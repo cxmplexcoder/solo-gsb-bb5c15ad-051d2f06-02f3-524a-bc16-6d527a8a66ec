@@ -4,6 +4,7 @@ import type {
   AliasEntry,
   AuditRecord,
   AuditReport,
+  ContextFilterStat,
   CueHit,
   DecisionSource,
   EntityDecision,
@@ -37,7 +38,24 @@ export function normalizeMaxCueGapMs(value: unknown): number {
   return DEFAULT_MAX_CUE_GAP_MS;
 }
 
-/** 兼容旧版本规则：补齐 mode / aliasPrefix / 跨 cue 字段，并规整非法值 */
+/** 上下文检查字符数上限（防止误填超大值截取超长上下文） */
+export const MAX_CONTEXT_CHARS_LIMIT = 10_000;
+
+/**
+ * 规整上下文检查字符数：非负有限整数，超出上限截断；非法值回退 0（不限制，
+ * 即一直取到扫描窗口边缘）。
+ */
+export function normalizeContextChars(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.min(Math.round(value), MAX_CONTEXT_CHARS_LIMIT);
+  }
+  return 0;
+}
+
+/**
+ * 兼容旧版本规则：补齐 mode / aliasPrefix / 跨 cue / 上下文条件字段，并规整非法值。
+ * 旧任务缺少上下文字段时一律按「无条件」迁移（beforePattern/afterPattern 为空）。
+ */
 export function normalizeRule(rule: MaskRule): MaskRule {
   return {
     ...rule,
@@ -45,6 +63,10 @@ export function normalizeRule(rule: MaskRule): MaskRule {
     aliasPrefix: typeof rule.aliasPrefix === 'string' ? rule.aliasPrefix : '',
     crossCue: rule.crossCue === true,
     maxCueGapMs: normalizeMaxCueGapMs(rule.maxCueGapMs),
+    beforePattern: typeof rule.beforePattern === 'string' ? rule.beforePattern : '',
+    afterPattern: typeof rule.afterPattern === 'string' ? rule.afterPattern : '',
+    beforeChars: normalizeContextChars(rule.beforeChars),
+    afterChars: normalizeContextChars(rule.afterChars),
   };
 }
 
@@ -80,6 +102,19 @@ export function entityDecisionKey(ruleId: string, entityKey: string): string {
 export interface CompiledRule {
   rule: MaskRule;
   regex: RegExp;
+  /** 命中前上下文条件正则（无 beforePattern 时为 null） */
+  beforeRegex: RegExp | null;
+  /** 命中后上下文条件正则（无 afterPattern 时为 null） */
+  afterRegex: RegExp | null;
+}
+
+/** 由规则标志派生上下文条件正则标志：保留 i/u/s 等，剔除 g/y/d（上下文判断只需 test） */
+function contextFlagsOf(flags: string): string {
+  const set = new Set((flags || '').split('').filter(Boolean));
+  set.delete('g');
+  set.delete('y');
+  set.delete('d');
+  return Array.from(set).join('');
 }
 
 export function compileRules(rules: MaskRule[]): {
@@ -88,23 +123,64 @@ export function compileRules(rules: MaskRule[]): {
 } {
   const compiled: CompiledRule[] = [];
   const errors: { ruleId: string; message: string }[] = [];
+  const compileContext = (
+    rule: MaskRule,
+    source: string,
+    side: '命中前' | '命中后',
+  ): RegExp | null | undefined => {
+    if (!source) return null; // 空条件 = 不限制
+    try {
+      return new RegExp(source, contextFlagsOf(rule.flags));
+    } catch (e) {
+      errors.push({ ruleId: rule.id, message: `${side}上下文正则无效：${(e as Error).message}` });
+      return undefined;
+    }
+  };
   for (const rawRule of rules) {
     const rule = normalizeRule(rawRule);
     if (!rule.enabled) continue;
     if (!rule.pattern) continue;
+    let regex: RegExp;
     try {
       // 去重并限制标志：g 必须有（遍历全部命中），剔除不支持的标志
       const flagSet = new Set((rule.flags || '').split('').filter(Boolean));
       flagSet.add('g');
       flagSet.delete('y');
       flagSet.delete('d');
-      const regex = new RegExp(rule.pattern, Array.from(flagSet).join(''));
-      compiled.push({ rule, regex });
+      regex = new RegExp(rule.pattern, Array.from(flagSet).join(''));
     } catch (e) {
       errors.push({ ruleId: rule.id, message: (e as Error).message });
+      continue;
     }
+    const beforeRegex = compileContext(rule, rule.beforePattern, '命中前');
+    const afterRegex = compileContext(rule, rule.afterPattern, '命中后');
+    // 任一侧上下文正则非法：整条规则不参与扫描，错误已在界面 / 预览中提示
+    if (beforeRegex === undefined || afterRegex === undefined) continue;
+    compiled.push({ rule, regex, beforeRegex, afterRegex });
   }
   return { compiled, errors };
+}
+
+/**
+ * 上下文条件判断：取候选命中在扫描窗口中的实际上下文片段做正则检索。
+ *  - 检查字符数为 0 时一直取到窗口边缘，否则只取紧邻命中的 N 个字符；
+ *  - 窗口边缘按实际可用字符处理（首 / 末命中只拿到较短的一侧）；
+ *  - 空条件（regex 为 null）恒通过。
+ */
+export function contextMatches(
+  regex: RegExp | null,
+  windowText: string,
+  matchStart: number,
+  matchEnd: number,
+  side: 'before' | 'after',
+  chars: number,
+): boolean {
+  if (!regex) return true;
+  const slice =
+    side === 'before'
+      ? windowText.slice(chars > 0 ? Math.max(0, matchStart - chars) : 0, matchStart)
+      : windowText.slice(matchEnd, chars > 0 ? matchEnd + chars : windowText.length);
+  return regex.test(slice);
 }
 
 /* ------------------------------------------------------------------ */
@@ -440,11 +516,28 @@ export function buildPreview(input: {
   }
 
   const raw: RawHit[] = [];
+  /** 上下文条件过滤计数（候选命中在优先级 / 重叠消解之前被过滤，不压制低优先级结果） */
+  const contextFilterMap = new Map<string, ContextFilterStat>();
+  const bumpContextFilter = (
+    rule: MaskRule,
+    side: 'before' | 'after',
+  ): void => {
+    let stat = contextFilterMap.get(rule.id);
+    if (!stat) {
+      stat = { ruleId: rule.id, ruleName: rule.name, beforeFiltered: 0, afterFiltered: 0 };
+      contextFilterMap.set(rule.id, stat);
+    }
+    if (side === 'before') stat.beforeFiltered++;
+    else stat.afterFiltered++;
+  };
+
   const scanText = (
     rule: MaskRule,
     regex: RegExp,
     text: string,
     spansOf: (start: number, end: number) => RawSpan[],
+    beforeRegex: RegExp | null = null,
+    afterRegex: RegExp | null = null,
   ): void => {
     regex.lastIndex = 0;
     let m: RegExpExecArray | null;
@@ -455,12 +548,31 @@ export function buildPreview(input: {
         regex.lastIndex++;
         continue;
       }
+      const start = m.index;
+      const end = start + matched.length;
+      // 上下文条件先行：候选命中须先按所在扫描窗口取上下文并通过条件，
+      // 再进入优先级与重叠消解（避免被过滤的高优先级命中继续压制低优先级结果）。
+      // 两侧独立计数：同时未通过时前 / 后计数各加一。
+      const beforeOk = contextMatches(
+        beforeRegex,
+        text,
+        start,
+        end,
+        'before',
+        rule.beforeChars,
+      );
+      const afterOk = contextMatches(afterRegex, text, start, end, 'after', rule.afterChars);
+      if (!beforeOk || !afterOk) {
+        if (!beforeOk) bumpContextFilter(rule, 'before');
+        if (!afterOk) bumpContextFilter(rule, 'after');
+        continue;
+      }
       const isAlias = rule.mode === 'alias';
       raw.push({
         ruleId: rule.id,
         ruleName: rule.name,
         priority: rule.priority,
-        spans: spansOf(m.index, m.index + matched.length),
+        spans: spansOf(start, end),
         match: matched,
         replacement: isAlias ? '' : applyTemplate(rule.replacement, matched, rule.name, m),
         entityKey: normalizeEntity(matched),
@@ -471,15 +583,23 @@ export function buildPreview(input: {
   const singleCueRules = compiled.filter((c) => !c.rule.crossCue);
   const crossCueRules = compiled.filter((c) => c.rule.crossCue);
 
-  /* 单 cue 规则：逐条 cue 扫描（原有行为） */
+  /* 单 cue 规则：逐条 cue 扫描（cue 自身即单 cue 扫描窗口，上下文取到 cue 边缘） */
   for (const cue of parsed.cues) {
     const { text } = plainByCue.get(cue.index)!;
-    for (const { rule, regex } of singleCueRules) {
-      scanText(rule, regex, text, (start, end) => [{ cueIndex: cue.index, start, end }]);
+    for (const { rule, regex, beforeRegex, afterRegex } of singleCueRules) {
+      scanText(
+        rule,
+        regex,
+        text,
+        (start, end) => [{ cueIndex: cue.index, start, end }],
+        beforeRegex,
+        afterRegex,
+      );
     }
   }
 
-  /* 跨 cue 规则：按各自最大间隔把相邻 cue 拼成扫描窗口，被断开的敏感串也能命中 */
+  /* 跨 cue 规则：按各自最大间隔把相邻 cue 拼成扫描窗口，被断开的敏感串也能命中。
+     上下文条件沿用同一拼接窗口判断（命中可跨越 cue 边界取到相邻 cue 的字符）。 */
   if (crossCueRules.length > 0) {
     const windowInput = parsed.cues.map((cue) => ({
       index: cue.index,
@@ -492,14 +612,24 @@ export function buildPreview(input: {
       const windows = buildScanWindows(windowInput, gap);
       const rules = crossCueRules.filter((c) => c.rule.maxCueGapMs === gap);
       for (const win of windows) {
-        for (const { rule, regex } of rules) {
-          scanText(rule, regex, win.text, (start, end) =>
-            spansFromWindowRange(win, start, end),
+        for (const { rule, regex, beforeRegex, afterRegex } of rules) {
+          scanText(
+            rule,
+            regex,
+            win.text,
+            (start, end) => spansFromWindowRange(win, start, end),
+            beforeRegex,
+            afterRegex,
           );
         }
       }
     }
   }
+
+  /* 上下文过滤计数按规则在规则集中的顺序输出（仅实际发生过滤的规则） */
+  const contextFilters = normalizedRules
+    .map((r) => contextFilterMap.get(r.id))
+    .filter((s): s is ContextFilterStat => !!s);
 
   const { kept, suppressed } = mergeHits(raw);
   const suppressedHits = suppressed.length;
@@ -654,6 +784,7 @@ export function buildPreview(input: {
     aliases,
     entities: Array.from(entityMap.values()),
     safety,
+    contextFilters,
   };
 }
 
@@ -791,6 +922,8 @@ export function runSafetyScan(
       start: number,
       end: number,
     ) => { anchorCueIndex: number; overlapped: SafetyScanSegment[]; cueIndexes: number[]; anchorStart: number; anchorEnd: number },
+    beforeRegex: RegExp | null = null,
+    afterRegex: RegExp | null = null,
   ): void => {
     regex.lastIndex = 0;
     let m: RegExpExecArray | null;
@@ -802,6 +935,13 @@ export function runSafetyScan(
       }
       const start = m.index;
       const end = start + matched.length;
+      // 与第一遍一致：上下文条件不通过的候选直接过滤（沿用拼接窗口、边缘按实际字符）
+      if (
+        !contextMatches(beforeRegex, text, start, end, 'before', rule.beforeChars) ||
+        !contextMatches(afterRegex, text, start, end, 'after', rule.afterChars)
+      ) {
+        continue;
+      }
       const { anchorCueIndex, overlapped, cueIndexes, anchorStart, anchorEnd } = locate(
         start,
         end,
@@ -831,18 +971,25 @@ export function runSafetyScan(
   const singleCueRules = compiled.filter((c) => !c.rule.crossCue);
   const crossCueRules = compiled.filter((c) => c.rule.crossCue);
 
-  /* 单 cue 规则：逐条候选文本二次扫描（原有行为） */
+  /* 单 cue 规则：逐条候选文本二次扫描（cue 即单 cue 窗口，上下文取到 cue 边缘） */
   for (const cue of cues) {
     const { text, segments } = finalByCue.get(cue.index)!;
     if (!text) continue;
-    for (const { rule, regex } of singleCueRules) {
-      scanOnce(rule, regex, text, (start, end) => ({
-        anchorCueIndex: cue.index,
-        overlapped: segments.filter((s) => s.start < end && start < s.end),
-        cueIndexes: [cue.index],
-        anchorStart: start,
-        anchorEnd: end,
-      }));
+    for (const { rule, regex, beforeRegex, afterRegex } of singleCueRules) {
+      scanOnce(
+        rule,
+        regex,
+        text,
+        (start, end) => ({
+          anchorCueIndex: cue.index,
+          overlapped: segments.filter((s) => s.start < end && start < s.end),
+          cueIndexes: [cue.index],
+          anchorStart: start,
+          anchorEnd: end,
+        }),
+        beforeRegex,
+        afterRegex,
+      );
     }
   }
 
@@ -859,28 +1006,35 @@ export function runSafetyScan(
       const windows = buildScanWindows(windowInput, gap);
       const rules = crossCueRules.filter((c) => c.rule.maxCueGapMs === gap);
       for (const win of windows) {
-        for (const { rule, regex } of rules) {
-          scanOnce(rule, regex, win.text, (start, end) => {
-            const spans = spansFromWindowRange(win, start, end);
-            const overlapped: SafetyScanSegment[] = [];
-            for (const span of spans) {
-              const { segments } = finalByCue.get(span.cueIndex)!;
-              for (const s of segments) {
-                if (s.start < span.end && span.start < s.end) {
-                  overlapped.push(
-                    spans.length > 1 ? { ...s, cueIndex: span.cueIndex } : s,
-                  );
+        for (const { rule, regex, beforeRegex, afterRegex } of rules) {
+          scanOnce(
+            rule,
+            regex,
+            win.text,
+            (start, end) => {
+              const spans = spansFromWindowRange(win, start, end);
+              const overlapped: SafetyScanSegment[] = [];
+              for (const span of spans) {
+                const { segments } = finalByCue.get(span.cueIndex)!;
+                for (const s of segments) {
+                  if (s.start < span.end && span.start < s.end) {
+                    overlapped.push(
+                      spans.length > 1 ? { ...s, cueIndex: span.cueIndex } : s,
+                    );
+                  }
                 }
               }
-            }
-            return {
-              anchorCueIndex: spans[0].cueIndex,
-              overlapped,
-              cueIndexes: spans.map((s) => s.cueIndex),
-              anchorStart: spans[0].start,
-              anchorEnd: spans[0].end,
-            };
-          });
+              return {
+                anchorCueIndex: spans[0].cueIndex,
+                overlapped,
+                cueIndexes: spans.map((s) => s.cueIndex),
+                anchorStart: spans[0].start,
+                anchorEnd: spans[0].end,
+              };
+            },
+            beforeRegex,
+            afterRegex,
+          );
         }
       }
     }
@@ -972,7 +1126,7 @@ export function exportResult(input: {
   const sha256 = createHash('sha256').update(input.vtt, 'utf8').digest('hex');
   const audit: AuditReport = {
     app: 'subtitle-mask-console',
-    version: 5,
+    version: 6,
     generatedAt: new Date().toISOString(),
     source: {
       sha256,
@@ -987,6 +1141,7 @@ export function exportResult(input: {
       suppressedHits: preview.suppressedHits,
       exceptionHits: preview.exceptionHits,
     },
+    contextFilters: preview.contextFilters,
     records,
     aliases: preview.aliases,
     entityDecisions: (input.entityDecisions ?? []).map((d) => ({

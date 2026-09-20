@@ -1,11 +1,14 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { HitException, JobState } from './types';
+import { normalizeRule } from './engine';
+import type { HitException, JobState, MaskRule } from './types';
 
 /**
  * 兼容旧版本任务文件，规整为当前 JobState：
  * - 旧版 revertedKeys（逐条撤销 key 列表）迁移为 state=reverted 的逐条例外；
- * - 缺少的实体决定 / 例外 / 化名表字段补空数组。
+ * - 缺少的实体决定 / 例外 / 化名表字段补空数组；
+ * - 旧规则缺少上下文字段（beforePattern / afterPattern / beforeChars / afterChars）
+ *   时按「无条件」迁移，缺少跨 cue / 化名字段同样补齐默认值。
  */
 export function migrateJobState(
   parsed: Partial<JobState> & { revertedKeys?: unknown },
@@ -23,10 +26,15 @@ export function migrateJobState(
       .filter((k): k is string => typeof k === 'string')
       .map((key) => ({ key, state: 'reverted' as const }));
   }
+  const rules: MaskRule[] = Array.isArray(parsed.rules)
+    ? parsed.rules
+        .filter((r): r is MaskRule => !!r && typeof r === 'object')
+        .map((r) => normalizeRule(r))
+    : [];
   return {
     jobId: typeof parsed.jobId === 'string' ? parsed.jobId : '',
     vtt: typeof parsed.vtt === 'string' ? parsed.vtt : '',
-    rules: Array.isArray(parsed.rules) ? parsed.rules : [],
+    rules,
     hitExceptions,
     entityDecisions: Array.isArray(parsed.entityDecisions)
       ? parsed.entityDecisions

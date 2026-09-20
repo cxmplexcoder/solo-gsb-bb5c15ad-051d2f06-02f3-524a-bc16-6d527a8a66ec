@@ -7,7 +7,11 @@ export function uid(prefix = 'rule'): string {
 /** 跨 cue 连续扫描的默认最大相邻间隔（毫秒），与服务端一致 */
 export const DEFAULT_MAX_CUE_GAP_MS = 500;
 
-/** 兼容旧版本规则：补齐稳定化名 / 跨 cue 连续扫描所需字段 */
+/**
+ * 兼容旧版本规则：补齐稳定化名 / 跨 cue 连续扫描 / 上下文条件所需字段。
+ * 旧任务缺少上下文字段时按「无条件」迁移（beforePattern / afterPattern 为空、
+ * 检查字符数为 0 = 不限制）。
+ */
 export function normalizeRule(rule: MaskRule): MaskRule {
   return {
     ...rule,
@@ -20,7 +24,19 @@ export function normalizeRule(rule: MaskRule): MaskRule {
       rule.maxCueGapMs >= 0
         ? Math.round(rule.maxCueGapMs)
         : DEFAULT_MAX_CUE_GAP_MS,
+    beforePattern: typeof rule.beforePattern === 'string' ? rule.beforePattern : '',
+    afterPattern: typeof rule.afterPattern === 'string' ? rule.afterPattern : '',
+    beforeChars: normalizeContextChars(rule.beforeChars),
+    afterChars: normalizeContextChars(rule.afterChars),
   };
+}
+
+/** 规整上下文检查字符数：非负有限整数；非法 / 负值回退 0（不限制，取到窗口边缘） */
+export function normalizeContextChars(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.round(value);
+  }
+  return 0;
 }
 
 /** 校验正则源码与标志，返回错误文案或 null */

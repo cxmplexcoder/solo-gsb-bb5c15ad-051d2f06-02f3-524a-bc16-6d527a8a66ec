@@ -240,6 +240,28 @@ export function Preview({
           <span className="stat-applied">将脱敏 {preview.appliedHits}</span>
           <span className="stat-reverted">已保留 {preview.revertedHits}</span>
           <span className="stat-suppressed">重叠抑制 {preview.suppressedHits}</span>
+          {preview.contextFilters.length > 0 && (
+            <span
+              className="stat-context"
+              title={
+                '上下文条件过滤（候选命中在优先级消解前被过滤）：\n' +
+                preview.contextFilters
+                  .map(
+                    (f) =>
+                      `「${f.ruleName}」命中前 ${f.beforeFiltered} 处、命中后 ${f.afterFiltered} 处`,
+                  )
+                  .join('\n')
+              }
+            >
+              上下文过滤{' '}
+              {preview.contextFilters.reduce(
+                (sum, f) =>
+                  // 同一候选两侧都未通过时前 / 后各计一次，统计口径与审计一致
+                  sum + f.beforeFiltered + f.afterFiltered,
+                0,
+              )}
+            </span>
+          )}
           {preview.exceptionHits > 0 && (
             <span className="stat-exception">逐条例外 {preview.exceptionHits}</span>
           )}
@@ -252,6 +274,20 @@ export function Preview({
           ) : (
             <span className="stat-safety-ok">残留检查通过</span>
           )}
+        </div>
+      )}
+
+      {preview && preview.contextFilters.length > 0 && (
+        <div className="context-filter-panel">
+          <span className="context-filter-title">
+            ⓘ 上下文条件过滤（未通过的候选在优先级 / 重叠消解前已排除，不压制其他规则）：
+          </span>
+          {preview.contextFilters.map((f) => (
+            <span key={f.ruleId} className="context-filter-chip">
+              「{f.ruleName}」命中前未过 <b>{f.beforeFiltered}</b> 处
+              {f.afterFiltered > 0 && <>、命中后未过 <b>{f.afterFiltered}</b> 处</>}
+            </span>
+          ))}
         </div>
       )}
 

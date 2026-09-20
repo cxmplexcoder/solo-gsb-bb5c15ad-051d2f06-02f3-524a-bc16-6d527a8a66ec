@@ -33,6 +33,18 @@ export function ExportModal({ vtt, audit, onClose }: Props) {
           <span>例外 {audit.stats.exceptionHits}</span>
           <span>记录 {audit.records.length} 条</span>
         </div>
+        {audit.contextFilters.length > 0 && (
+          <div className="export-context" title="候选命中在优先级 / 重叠消解之前因上下文条件未通过被过滤；同一候选两侧都未通过时前 / 后各计一次">
+            上下文条件过滤：
+            {audit.contextFilters.map((f, i) => (
+              <span key={f.ruleId}>
+                {i > 0 && '；'}
+                「{f.ruleName}」命中前 {f.beforeFiltered} / 命中后 {f.afterFiltered}
+              </span>
+            ))}
+            （已记入审计 <code>contextFilters</code>）
+          </div>
+        )}
         <div className="export-safety">
           ✓ 导出残留防线：二次扫描通过
           {audit.safetyScan.counts.kept > 0

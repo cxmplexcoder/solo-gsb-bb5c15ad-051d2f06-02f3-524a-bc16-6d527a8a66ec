@@ -29,6 +29,19 @@ export interface MaskRule {
   crossCue: boolean;
   /** 跨 cue 模式的最大相邻间隔毫秒数（下一条开始时间 − 上一条结束时间） */
   maxCueGapMs: number;
+  /**
+   * 命中前上下文条件正则源码（不含首尾 /）：候选命中需先通过条件判断才进入
+   * 优先级与重叠消解；空字符串表示不限制。判断时取命中所在扫描窗口中、
+   * 命中起点之前最多 beforeChars 个实际可用字符（0 = 取到窗口边缘）作为上下文，
+   * 在其中检索该正则。
+   */
+  beforePattern: string;
+  /** 命中后上下文条件正则源码（不含首尾 /）；空字符串表示不限制 */
+  afterPattern: string;
+  /** 命中前检查字符数：只取紧邻命中前的 N 个字符做判断；0 = 一直取到窗口边缘 */
+  beforeChars: number;
+  /** 命中后检查字符数：只取紧邻命中后的 N 个字符做判断；0 = 一直取到窗口边缘 */
+  afterChars: number;
 }
 
 /**
@@ -233,6 +246,16 @@ export interface SafetyScanSummary {
   issues: SafetyScanIssue[];
 }
 
+/** 单条规则因上下文条件被过滤的候选命中计数（按未通过侧分别统计） */
+export interface ContextFilterStat {
+  ruleId: string;
+  ruleName: string;
+  /** 因命中前条件未通过被过滤的候选命中数 */
+  beforeFiltered: number;
+  /** 因命中后条件未通过被过滤的候选命中数（两侧都未通过时各自计数） */
+  afterFiltered: number;
+}
+
 export interface PreviewResult {
   cueCount: number;
   totalHits: number;
@@ -249,6 +272,8 @@ export interface PreviewResult {
   entities: EntitySummary[];
   /** 导出残留防线：按最终状态生成候选文本后二次扫描的结果 */
   safety: SafetyScanSummary;
+  /** 上下文条件过滤计数（仅列实际发生过滤的规则，按规则顺序） */
+  contextFilters: ContextFilterStat[];
 }
 
 export interface PreviewInput {
@@ -306,6 +331,8 @@ export interface AuditReport {
     /** 有显式例外的胜出命中数 */
     exceptionHits: number;
   };
+  /** 第一遍扫描中因上下文条件被过滤的候选命中计数（标明未通过的是哪一侧） */
+  contextFilters: ContextFilterStat[];
   records: AuditRecord[];
   /** 稳定化名表（实体键、最终化名、编号、是否自动生成） */
   aliases?: AliasEntry[];

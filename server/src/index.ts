@@ -57,11 +57,43 @@ function validateRules(rules: unknown): MaskRule[] | string {
         rule.maxCueGapMs < 0)
     )
       return `规则 ${rule.id} 跨 cue 最大间隔必须是非负数字`;
+    if (
+      rule.beforePattern !== undefined &&
+      typeof rule.beforePattern !== 'string'
+    )
+      return `规则 ${rule.id} 命中前上下文正则必须是字符串`;
+    if (
+      rule.afterPattern !== undefined &&
+      typeof rule.afterPattern !== 'string'
+    )
+      return `规则 ${rule.id} 命中后上下文正则必须是字符串`;
+    for (const f of ['beforeChars', 'afterChars'] as const) {
+      if (
+        rule[f] !== undefined &&
+        (typeof rule[f] !== 'number' || !Number.isFinite(rule[f]) || rule[f] < 0)
+      )
+        return `规则 ${rule.id} 上下文检查字符数必须是非负数字`;
+    }
     const normalized = normalizeRule(rule as unknown as MaskRule);
     try {
       new RegExp(normalized.pattern, normalized.flags);
     } catch (e) {
       return `规则「${normalized.name}」正则无效：${(e as Error).message}`;
+    }
+    const contextFlags = normalized.flags
+      .split('')
+      .filter((f) => f !== 'g' && f !== 'y' && f !== 'd')
+      .join('');
+    for (const [side, src] of [
+      ['命中前', normalized.beforePattern],
+      ['命中后', normalized.afterPattern],
+    ] as const) {
+      if (!src) continue;
+      try {
+        new RegExp(src, contextFlags);
+      } catch (e) {
+        return `规则「${normalized.name}」${side}上下文正则无效：${(e as Error).message}`;
+      }
     }
     out.push(normalized);
   }
