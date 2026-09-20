@@ -1,6 +1,27 @@
 /** 替换模式：固定模板 / 稳定化名 */
 export type RuleMode = 'template' | 'alias';
 
+/**
+ * 上下文条件：命中前 / 命中后各一组。
+ * 在命中所在扫描窗口（单 cue 纯文本或跨 cue 拼接窗口）中，
+ * 取命中边界前 / 后最多 chars 个字符作为上下文（窗口边缘按实际可用字符），
+ * 用 pattern 在该上下文上检索；pattern 为空串表示该侧不限制。
+ */
+export interface ContextCondition {
+  /** 上下文正则（不含首尾 /），空串 = 不限制 */
+  pattern: string;
+  /** 检查字符数：从命中边界向窗口边缘截取的字符数 */
+  chars: number;
+}
+
+/** 上下文条件过滤计数：按未通过的一侧分别统计（两侧都未通过时两侧各计一次） */
+export interface ContextFilteredCount {
+  /** 因命中前上下文条件未通过被过滤的候选命中数 */
+  pre: number;
+  /** 因命中后上下文条件未通过被过滤的候选命中数 */
+  post: number;
+}
+
 /** 脱敏规则 */
 export interface MaskRule {
   id: string;
@@ -29,6 +50,13 @@ export interface MaskRule {
   crossCue: boolean;
   /** 跨 cue 模式的最大相邻间隔毫秒数（下一条开始时间 − 上一条结束时间） */
   maxCueGapMs: number;
+  /**
+   * 命中前上下文条件：候选命中须先通过才进入优先级与重叠消解；
+   * pattern 为空表示不限制（旧任务缺字段时按此迁移）
+   */
+  preContext: ContextCondition;
+  /** 命中后上下文条件：同上，作用于命中之后的窗口文本 */
+  postContext: ContextCondition;
 }
 
 /**
@@ -241,6 +269,8 @@ export interface PreviewResult {
   suppressedHits: number;
   /** 有显式例外的胜出命中数 */
   exceptionHits: number;
+  /** 上下文条件过滤计数（按未通过的一侧分别统计） */
+  contextFiltered: ContextFilteredCount;
   cues: CueHit[];
   parseErrors: string[];
   /** 计算后完整的化名表（已持久条目 + 本次首次命中新建条目） */
@@ -305,6 +335,8 @@ export interface AuditReport {
     suppressedHits: number;
     /** 有显式例外的胜出命中数 */
     exceptionHits: number;
+    /** 上下文条件过滤计数（pre 命中前 / post 命中后条件未通过） */
+    contextFiltered: ContextFilteredCount;
   };
   records: AuditRecord[];
   /** 稳定化名表（实体键、最终化名、编号、是否自动生成） */

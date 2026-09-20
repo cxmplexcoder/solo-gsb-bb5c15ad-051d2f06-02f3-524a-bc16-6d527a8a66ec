@@ -23,6 +23,12 @@ function test(name: string, fn: () => void): void {
   console.log(`  ✓ ${name}`);
 }
 
+/** 空上下文条件（不限制），供测试内联规则使用 */
+const NO_CTX = {
+  preContext: { pattern: '', chars: 20 },
+  postContext: { pattern: '', chars: 20 },
+};
+
 function presetRule(name: string, override: Partial<MaskRule> = {}): MaskRule {
   const p = PRESETS.find((x) => x.rule.name === name)!;
   return { id: 'r-' + name, ...p.rule, ...override };
@@ -187,6 +193,7 @@ test('稳定化名：NFKC 与首尾空白规范化实体键', () => {
     aliasPrefix: '代号',
     crossCue: false,
     maxCueGapMs: 500,
+    ...NO_CTX,
   };
   const vtt = `WEBVTT
 
@@ -267,6 +274,7 @@ test('稳定化名：与模板规则并存，优先级抑制照常', () => {
     aliasPrefix: '人物',
     crossCue: false,
     maxCueGapMs: 500,
+    ...NO_CTX,
   };
   const alias: MaskRule = {
     id: 'al',
@@ -380,6 +388,7 @@ test('实体决策：NFKC 归一后同实体跨写法继承决定', () => {
     aliasPrefix: '',
     crossCue: false,
     maxCueGapMs: 500,
+    ...NO_CTX,
   };
   const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n编号 1234 与 １２３４\n';
   const v = buildPreview({
@@ -434,7 +443,7 @@ test('实体决策：审计记录决策来源，导出与预览状态一致', ()
   const recs = ex.audit.records.filter((r) => r.entityKey === '张伟');
   assert.ok(recs.some((r) => r.status === 'applied' && r.decisionSource === 'exception'));
   assert.ok(recs.some((r) => r.status === 'reverted' && r.decisionSource === 'entity'));
-  assert.strictEqual(ex.audit.version, 5);
+  assert.strictEqual(ex.audit.version, 6);
   assert.strictEqual(ex.audit.stats.exceptionHits, 1);
   assert.ok(ex.audit.entityDecisions!.some((d) => d.entityKey === '张伟' && d.action === 'keep'));
   // 导出 VTT 与预览最终状态一致：例外处替换，其余保留
@@ -597,6 +606,7 @@ test('残留防线：被抑制命中随保留复现归为人工保留', () => {
     aliasPrefix: '',
     crossCue: false,
     maxCueGapMs: 500,
+    ...NO_CTX,
   };
   const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n张伟先生到了。\n';
   const v1 = buildPreview({ vtt, rules: [nameRule, wider] });
@@ -629,6 +639,7 @@ test('残留防线：替换产物命中阻断导出并报告来源与目标规�
     aliasPrefix: '',
     crossCue: false,
     maxCueGapMs: 500,
+    ...NO_CTX,
   };
   const target: MaskRule = {
     id: 't1',
@@ -642,6 +653,7 @@ test('残留防线：替换产物命中阻断导出并报告来源与目标规�
     aliasPrefix: '',
     crossCue: false,
     maxCueGapMs: 500,
+    ...NO_CTX,
   };
   const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n我住在朝阳路5号。\n';
   const v = buildPreview({ vtt, rules: [producer, target] });
@@ -687,6 +699,7 @@ test('残留防线：跨边界新命中阻断导出并列出涉及区间', () =>
     aliasPrefix: '',
     crossCue: false,
     maxCueGapMs: 500,
+    ...NO_CTX,
   };
   const phone = presetRule('手机号');
   const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n电话 138-12345678 已登记。\n';
@@ -734,6 +747,7 @@ function crossPhoneRule(override: Partial<MaskRule> = {}): MaskRule {
     aliasPrefix: '号码',
     crossCue: true,
     maxCueGapMs: 500,
+    ...NO_CTX,
     ...override,
   };
 }
@@ -840,6 +854,7 @@ test('跨 cue：与单 cue 命中统一按优先级 / 长度消解重叠', () =>
     aliasPrefix: '',
     crossCue: false,
     maxCueGapMs: 500,
+    ...NO_CTX,
   };
   // 单 cue 高优先级命中与跨 cue 命中在第二条字幕重叠 → 跨 cue 命中被抑制
   const v1 = buildPreview({ vtt: CROSS_VTT, rules: [crossPhoneRule(), tail] });
@@ -941,6 +956,198 @@ test('跨 cue：旧规则缺少跨 cue 字段时按默认补齐', () => {
   assert.strictEqual(n2.maxCueGapMs, 500, '非法间隔回退默认');
   const n3 = normalizeRule({ ...n, crossCue: true, maxCueGapMs: 800.6 });
   assert.strictEqual(n3.maxCueGapMs, 801, '间隔取整');
+});
+
+/* ---------------------------- 上下文条件 ---------------------------- */
+
+/** 带上下文条件的手机号规则（单 cue） */
+function ctxPhoneRule(
+  ctx: { pre?: string; preChars?: number; post?: string; postChars?: number } = {},
+  override: Partial<MaskRule> = {},
+): MaskRule {
+  return {
+    id: 'r-ctx',
+    name: '手机号-语境',
+    pattern: '(?<!\\d)(1[3-9]\\d)\\d{4}(\\d{4})(?!\\d)',
+    flags: 'g',
+    replacement: '$1****$2',
+    priority: 50,
+    enabled: true,
+    mode: 'template',
+    aliasPrefix: '号码',
+    crossCue: false,
+    maxCueGapMs: 500,
+    preContext: { pattern: ctx.pre ?? '', chars: ctx.preChars ?? 20 },
+    postContext: { pattern: ctx.post ?? '', chars: ctx.postChars ?? 20 },
+    ...override,
+  };
+}
+
+const CTX_VTT = `WEBVTT
+
+00:00:00.000 --> 00:00:03.000
+我的手机号是13812345678，请回拨。
+
+00:00:03.500 --> 00:00:06.000
+工号 13987654321 已登记。
+`;
+
+test('上下文条件：命中前条件过滤候选命中并计数，审计带过滤计数', () => {
+  const rule = ctxPhoneRule({ pre: '手机|电话', preChars: 6 });
+  const v = buildPreview({ vtt: CTX_VTT, rules: [rule] });
+  assert.strictEqual(v.totalHits, 1, '仅「手机号是」语境的号码命中');
+  assert.strictEqual(v.cues[0].hits[0].match, '13812345678');
+  assert.strictEqual(v.cues[1].hits.length, 0, '工号语境不满足前置条件，被过滤');
+  assert.deepStrictEqual(v.contextFiltered, { pre: 1, post: 0 });
+  // 导出：满足语境的脱敏，被过滤的保留原文；审计统计含过滤计数
+  const ex = exportResult({ vtt: CTX_VTT, rules: [rule] });
+  assert.ok(ex.vtt.includes('138****5678'));
+  assert.ok(ex.vtt.includes('13987654321'), '被条件过滤的号码保持原文');
+  assert.deepStrictEqual(ex.audit.stats.contextFiltered, { pre: 1, post: 0 });
+});
+
+test('上下文条件：命中后条件过滤候选命中并计数', () => {
+  const rule = ctxPhoneRule({ post: '请回拨', postChars: 4 });
+  const v = buildPreview({ vtt: CTX_VTT, rules: [rule] });
+  assert.strictEqual(v.totalHits, 1);
+  assert.strictEqual(v.cues[0].hits[0].match, '13812345678');
+  assert.deepStrictEqual(v.contextFiltered, { pre: 0, post: 1 });
+});
+
+test('上下文条件：检查字符数限定窗口，窗口边缘按实际可用字符', () => {
+  // 语境词在命中前 6 字符内 → 通过；收紧到 2 字符 → 两条都被过滤
+  const wide = ctxPhoneRule({ pre: '手机', preChars: 6 });
+  const narrow = ctxPhoneRule({ pre: '手机', preChars: 2 });
+  assert.strictEqual(buildPreview({ vtt: CTX_VTT, rules: [wide] }).totalHits, 1);
+  const vNarrow = buildPreview({ vtt: CTX_VTT, rules: [narrow] });
+  assert.strictEqual(vNarrow.totalHits, 0, '命中前 2 字符内无「手机」');
+  assert.strictEqual(vNarrow.contextFiltered.pre, 2);
+
+  // 命中位于 cue 开头 / 结尾：上下文按实际可用字符（空串）判断
+  const edgeVtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n13812345678\n';
+  const vPre = buildPreview({ vtt: edgeVtt, rules: [ctxPhoneRule({ pre: '手机', preChars: 5 })] });
+  assert.strictEqual(vPre.totalHits, 0, '窗口起点无可用前文，前置条件不通过');
+  assert.strictEqual(vPre.contextFiltered.pre, 1);
+  const vPost = buildPreview({ vtt: edgeVtt, rules: [ctxPhoneRule({ post: '。', postChars: 5 })] });
+  assert.strictEqual(vPost.totalHits, 0, '窗口末尾无可用后文，后置条件不通过');
+  assert.strictEqual(vPost.contextFiltered.post, 1);
+  // 空条件不限制：同一文本正常命中
+  assert.strictEqual(buildPreview({ vtt: edgeVtt, rules: [ctxPhoneRule()] }).totalHits, 1);
+});
+
+test('上下文条件：被过滤的高优先级命中不压制低优先级结果', () => {
+  const high: MaskRule = {
+    id: 'r-high',
+    name: '高优先级-限语境',
+    pattern: '\\d{11}',
+    flags: 'g',
+    replacement: '$MASKALL',
+    priority: 80,
+    enabled: true,
+    mode: 'template',
+    aliasPrefix: '',
+    crossCue: false,
+    maxCueGapMs: 500,
+    preContext: { pattern: '手机', chars: 6 },
+    postContext: { pattern: '', chars: 20 },
+  };
+  const low = ctxPhoneRule({}, { id: 'r-low', name: '低优先级', priority: 10 });
+
+  // 高优先级候选被前置条件过滤 → 低优先级命中正常入选，无抑制
+  const vtt1 = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n工号 13812345678 已登记。\n';
+  const v1 = buildPreview({ vtt: vtt1, rules: [high, low] });
+  assert.strictEqual(v1.totalHits, 1);
+  assert.strictEqual(v1.cues[0].hits[0].ruleId, 'r-low');
+  assert.strictEqual(v1.suppressedHits, 0, '被过滤的命中不参与重叠消解');
+  assert.strictEqual(v1.contextFiltered.pre, 1);
+
+  // 语境满足时高优先级规则正常吞并低优先级命中
+  const vtt2 = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n手机号 13812345678 已登记。\n';
+  const v2 = buildPreview({ vtt: vtt2, rules: [high, low] });
+  assert.strictEqual(v2.cues[0].hits[0].ruleId, 'r-high');
+  assert.strictEqual(v2.suppressedHits, 1);
+  assert.strictEqual(v2.contextFiltered.pre, 0);
+});
+
+test('上下文条件：跨 cue 规则在拼接窗口上判断上下文', () => {
+  // 语境词「手机」在窗口前一条 cue 中，跨 cue 命中照常通过条件
+  const rule = crossPhoneRule({ preContext: { pattern: '手机', chars: 8 } });
+  const v = buildPreview({ vtt: CROSS_VTT, rules: [rule] });
+  assert.strictEqual(v.totalHits, 1, '拼接窗口前文含「手机」，跨 cue 命中通过条件');
+  assert.strictEqual(v.cues[0].hits[0].match, '13812345678');
+
+  // 条件不满足时整个跨 cue 候选被过滤；残留防线同样豁免、不阻断导出
+  const v2 = buildPreview({
+    vtt: CROSS_VTT,
+    rules: [crossPhoneRule({ preContext: { pattern: '邮箱', chars: 8 } })],
+  });
+  assert.strictEqual(v2.totalHits, 0);
+  assert.strictEqual(v2.contextFiltered.pre, 1);
+  assert.strictEqual(v2.safety.issues.length, 0, '被过滤的跨 cue 残留不列为问题');
+  assert.strictEqual(v2.safety.blocked, false);
+
+  // 后置条件同样作用于拼接窗口（命中后的字符在后续 cue 中）
+  const v3 = buildPreview({
+    vtt: CROSS_VTT,
+    rules: [crossPhoneRule({ postContext: { pattern: '记住', chars: 6 } })],
+  });
+  assert.strictEqual(v3.totalHits, 1, '后文「，记住了吗」在窗口内，后置条件通过');
+});
+
+test('上下文条件：被过滤的残留在二次扫描中同样豁免，不阻断导出', () => {
+  // 号码不满足前置语境：第一遍被过滤，候选文本仍含号码；
+  // 二次扫描在同一条件下同样过滤 → 不报问题、不阻断导出
+  const rule = ctxPhoneRule({ pre: '手机', preChars: 6 });
+  const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n工号 13812345678 已登记。\n';
+  const v = buildPreview({ vtt, rules: [rule] });
+  assert.strictEqual(v.totalHits, 0);
+  assert.strictEqual(v.safety.issues.length, 0, '条件过滤的残留不列为问题');
+  assert.strictEqual(v.safety.blocked, false);
+  const ex = exportResult({ vtt, rules: [rule] });
+  assert.ok(ex.vtt.includes('13812345678'));
+  assert.deepStrictEqual(ex.audit.safetyScan.counts, { kept: 0, artifact: 0, crossBoundary: 0 });
+});
+
+test('上下文条件：两侧都未通过时两侧各计一次', () => {
+  const rule = ctxPhoneRule({ pre: '手机', preChars: 6, post: '请回拨', postChars: 4 });
+  const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n工号 13812345678 已登记。\n';
+  const v = buildPreview({ vtt, rules: [rule] });
+  assert.strictEqual(v.totalHits, 0);
+  assert.deepStrictEqual(v.contextFiltered, { pre: 1, post: 1 });
+});
+
+test('上下文条件：无效条件正则在预览中报错且不中断', () => {
+  const bad = ctxPhoneRule({ pre: '([0-9]+' });
+  const v = buildPreview({ vtt: CTX_VTT, rules: [bad] });
+  assert.ok(v.parseErrors.some((e) => e.includes('r-ctx') && e.includes('上下文')));
+  assert.strictEqual(v.totalHits, 0, '条件正则无效的规则不参与扫描');
+});
+
+test('上下文条件：旧任务缺少条件字段时按不限制迁移', () => {
+  const legacy = presetRule('手机号') as unknown as Record<string, unknown>;
+  delete legacy.preContext;
+  delete legacy.postContext;
+  const n = normalizeRule(legacy as unknown as MaskRule);
+  assert.deepStrictEqual(n.preContext, { pattern: '', chars: 20 });
+  assert.deepStrictEqual(n.postContext, { pattern: '', chars: 20 });
+  // 非法字符数回退默认，超出上限截断
+  const n2 = normalizeRule({
+    ...n,
+    preContext: { pattern: '手机', chars: -3 },
+    postContext: { pattern: '', chars: 99999 },
+  });
+  assert.strictEqual(n2.preContext.chars, 20, '非法字符数回退默认');
+  assert.strictEqual(n2.postContext.chars, 500, '字符数超出上限截断');
+  // 旧任务文件迁移：规则缺字段不报错，使用时按无条件处理
+  const migrated = migrateJobState({
+    jobId: 'j',
+    vtt: '',
+    rules: [legacy as unknown as MaskRule],
+    updatedAt: '',
+  });
+  assert.strictEqual(migrated.rules.length, 1);
+  const v = buildPreview({ vtt: SAMPLE_VTT, rules: migrated.rules });
+  assert.ok(v.totalHits >= 2, '缺条件字段的旧规则照常命中（不限制）');
 });
 
 console.log(`\n引擎自测全部通过（${passed} 项）`);

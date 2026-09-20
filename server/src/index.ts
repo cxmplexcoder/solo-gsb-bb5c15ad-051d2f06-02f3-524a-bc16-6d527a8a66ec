@@ -57,11 +57,39 @@ function validateRules(rules: unknown): MaskRule[] | string {
         rule.maxCueGapMs < 0)
     )
       return `规则 ${rule.id} 跨 cue 最大间隔必须是非负数字`;
+    for (const [field, label] of [
+      ['preContext', '命中前'],
+      ['postContext', '命中后'],
+    ] as const) {
+      const cond = rule[field];
+      if (cond === undefined) continue; // 旧任务缺字段：按无条件迁移
+      if (cond === null || typeof cond !== 'object')
+        return `规则 ${rule.id} ${label}上下文条件必须是对象`;
+      const c = cond as Record<string, unknown>;
+      if (c.pattern !== undefined && typeof c.pattern !== 'string')
+        return `规则 ${rule.id} ${label}上下文正则必须是字符串`;
+      if (
+        c.chars !== undefined &&
+        (typeof c.chars !== 'number' || !Number.isFinite(c.chars) || c.chars < 0)
+      )
+        return `规则 ${rule.id} ${label}上下文检查字符数必须是非负数字`;
+    }
     const normalized = normalizeRule(rule as unknown as MaskRule);
     try {
       new RegExp(normalized.pattern, normalized.flags);
     } catch (e) {
       return `规则「${normalized.name}」正则无效：${(e as Error).message}`;
+    }
+    for (const [cond, label] of [
+      [normalized.preContext, '命中前'],
+      [normalized.postContext, '命中后'],
+    ] as const) {
+      if (!cond.pattern) continue;
+      try {
+        new RegExp(cond.pattern, normalized.flags);
+      } catch (e) {
+        return `规则「${normalized.name}」${label}上下文正则无效：${(e as Error).message}`;
+      }
     }
     out.push(normalized);
   }

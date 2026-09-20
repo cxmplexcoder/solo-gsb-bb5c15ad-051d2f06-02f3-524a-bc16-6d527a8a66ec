@@ -1,5 +1,21 @@
 export type RuleMode = 'template' | 'alias';
 
+/**
+ * 上下文条件：命中前 / 命中后各一组。
+ * 在命中所在扫描窗口（单 cue 纯文本或跨 cue 拼接窗口）取命中边界前 / 后
+ * 最多 chars 个字符作为上下文（窗口边缘按实际可用字符），pattern 为空 = 不限制。
+ */
+export interface ContextCondition {
+  pattern: string;
+  chars: number;
+}
+
+/** 上下文条件过滤计数：按未通过的一侧分别统计 */
+export interface ContextFilteredCount {
+  pre: number;
+  post: number;
+}
+
 export interface MaskRule {
   id: string;
   name: string;
@@ -16,6 +32,10 @@ export interface MaskRule {
   crossCue: boolean;
   /** 跨 cue 模式的最大相邻间隔毫秒数 */
   maxCueGapMs: number;
+  /** 命中前上下文条件（pattern 为空 = 不限制） */
+  preContext: ContextCondition;
+  /** 命中后上下文条件（pattern 为空 = 不限制） */
+  postContext: ContextCondition;
 }
 
 /** 稳定化名映射条目（持久化，编号不复用） */
@@ -175,6 +195,8 @@ export interface PreviewResult {
   suppressedHits: number;
   /** 有显式例外的胜出命中数 */
   exceptionHits: number;
+  /** 上下文条件过滤计数（pre 命中前 / post 命中后条件未通过） */
+  contextFiltered: ContextFilteredCount;
   cues: CueHit[];
   parseErrors: string[];
   aliases: AliasEntry[];
@@ -227,6 +249,8 @@ export interface AuditReport {
     revertedHits: number;
     suppressedHits: number;
     exceptionHits: number;
+    /** 上下文条件过滤计数（pre 命中前 / post 命中后条件未通过） */
+    contextFiltered: ContextFilteredCount;
   };
   records: AuditRecord[];
   aliases?: AliasEntry[];

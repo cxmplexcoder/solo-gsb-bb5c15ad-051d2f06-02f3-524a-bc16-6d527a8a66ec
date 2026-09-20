@@ -31,6 +31,11 @@ export function ExportModal({ vtt, audit, onClose }: Props) {
           <span>保留 {audit.stats.revertedHits}</span>
           <span>抑制 {audit.stats.suppressedHits}</span>
           <span>例外 {audit.stats.exceptionHits}</span>
+          {(audit.stats.contextFiltered.pre > 0 || audit.stats.contextFiltered.post > 0) && (
+            <span title="因上下文条件未通过被过滤的候选命中数（命中前条件 / 命中后条件）">
+              条件过滤 前{audit.stats.contextFiltered.pre} / 后{audit.stats.contextFiltered.post}
+            </span>
+          )}
           <span>记录 {audit.records.length} 条</span>
         </div>
         <div className="export-safety">

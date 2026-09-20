@@ -6,10 +6,14 @@ export interface Preset {
   rule: Omit<MaskRule, 'id'>;
 }
 
+/** 空上下文条件（不限制），预设默认值 */
+const NO_CONTEXT = { pattern: '', chars: 20 } as const;
+
 /**
  * 内置脱敏规则预设（可在此基础上编辑/增删）。
  * 替换模板支持：$1/$2 捕获组、$& 整体命中、$<name> 命名组、
  * $KEEP:n（保留前 n 字其余打码）、$MASK:n、$MASKALL、$RULE。
+ * 上下文条件（preContext / postContext）为空表示不限制。
  */
 export const PRESETS: Preset[] = [
   {
@@ -26,6 +30,8 @@ export const PRESETS: Preset[] = [
       aliasPrefix: '号码',
       crossCue: false,
       maxCueGapMs: 500,
+      preContext: { ...NO_CONTEXT },
+      postContext: { ...NO_CONTEXT },
     },
   },
   {
@@ -42,6 +48,8 @@ export const PRESETS: Preset[] = [
       aliasPrefix: '号码',
       crossCue: false,
       maxCueGapMs: 500,
+      preContext: { ...NO_CONTEXT },
+      postContext: { ...NO_CONTEXT },
     },
   },
   {
@@ -58,6 +66,8 @@ export const PRESETS: Preset[] = [
       aliasPrefix: '邮箱',
       crossCue: false,
       maxCueGapMs: 500,
+      preContext: { ...NO_CONTEXT },
+      postContext: { ...NO_CONTEXT },
     },
   },
   {
@@ -74,6 +84,8 @@ export const PRESETS: Preset[] = [
       aliasPrefix: '证件',
       crossCue: false,
       maxCueGapMs: 500,
+      preContext: { ...NO_CONTEXT },
+      postContext: { ...NO_CONTEXT },
     },
   },
   {
@@ -90,6 +102,8 @@ export const PRESETS: Preset[] = [
       aliasPrefix: '卡号',
       crossCue: false,
       maxCueGapMs: 500,
+      preContext: { ...NO_CONTEXT },
+      postContext: { ...NO_CONTEXT },
     },
   },
   {
@@ -106,6 +120,8 @@ export const PRESETS: Preset[] = [
       aliasPrefix: '链接',
       crossCue: false,
       maxCueGapMs: 500,
+      preContext: { ...NO_CONTEXT },
+      postContext: { ...NO_CONTEXT },
     },
   },
   {
@@ -123,6 +139,8 @@ export const PRESETS: Preset[] = [
       aliasPrefix: '人物',
       crossCue: false,
       maxCueGapMs: 500,
+      preContext: { ...NO_CONTEXT },
+      postContext: { ...NO_CONTEXT },
     },
   },
   {
@@ -141,6 +159,8 @@ export const PRESETS: Preset[] = [
       aliasPrefix: '人物',
       crossCue: false,
       maxCueGapMs: 500,
+      preContext: { ...NO_CONTEXT },
+      postContext: { ...NO_CONTEXT },
     },
   },
   {
@@ -158,6 +178,27 @@ export const PRESETS: Preset[] = [
       aliasPrefix: '号码',
       crossCue: true,
       maxCueGapMs: 800,
+      preContext: { ...NO_CONTEXT },
+      postContext: { ...NO_CONTEXT },
+    },
+  },
+  {
+    name: '手机号（语境限定：前文提到「手机/电话」）',
+    description:
+      '演示上下文条件：仅当号码前 6 个字符内出现「手机 / 电话 / 联系方式」才脱敏，其余 11 位数字保留；被条件过滤的命中不压制其他规则',
+    rule: {
+      name: '手机号-语境限定',
+      pattern: '(?<!\\d)(1[3-9]\\d)\\d{4}(\\d{4})(?!\\d)',
+      flags: 'g',
+      replacement: '$1****$2',
+      priority: 50,
+      enabled: false,
+      mode: 'template',
+      aliasPrefix: '号码',
+      crossCue: false,
+      maxCueGapMs: 500,
+      preContext: { pattern: '手机|电话|联系方式', chars: 6 },
+      postContext: { ...NO_CONTEXT },
     },
   },
 ];

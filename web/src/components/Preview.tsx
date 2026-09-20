@@ -243,6 +243,14 @@ export function Preview({
           {preview.exceptionHits > 0 && (
             <span className="stat-exception">逐条例外 {preview.exceptionHits}</span>
           )}
+          {(preview.contextFiltered.pre > 0 || preview.contextFiltered.post > 0) && (
+            <span
+              className="stat-filtered"
+              title="候选命中因上下文条件未通过被过滤（不参与优先级吞并）：命中前条件 / 命中后条件"
+            >
+              条件过滤 前{preview.contextFiltered.pre} / 后{preview.contextFiltered.post}
+            </span>
+          )}
           {preview.safety.blocked ? (
             <span className="stat-safety-blocked">
               残留阻断 {preview.safety.artifact + preview.safety.crossBoundary}

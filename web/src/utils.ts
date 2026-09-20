@@ -1,4 +1,4 @@
-import type { EntityDecision, Hit, HitException, MaskRule } from './types';
+import type { ContextCondition, EntityDecision, Hit, HitException, MaskRule } from './types';
 
 export function uid(prefix = 'rule'): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -7,7 +7,21 @@ export function uid(prefix = 'rule'): string {
 /** 跨 cue 连续扫描的默认最大相邻间隔（毫秒），与服务端一致 */
 export const DEFAULT_MAX_CUE_GAP_MS = 500;
 
-/** 兼容旧版本规则：补齐稳定化名 / 跨 cue 连续扫描所需字段 */
+/** 上下文条件默认检查字符数，与服务端一致 */
+export const DEFAULT_CONTEXT_CHARS = 20;
+
+/** 规整单侧上下文条件：旧任务缺字段时按空条件（不限制）迁移 */
+export function normalizeContextCondition(value: unknown): ContextCondition {
+  const v = (value ?? {}) as { pattern?: unknown; chars?: unknown };
+  const pattern = typeof v.pattern === 'string' ? v.pattern : '';
+  const chars =
+    typeof v.chars === 'number' && Number.isFinite(v.chars) && v.chars >= 1
+      ? Math.round(v.chars)
+      : DEFAULT_CONTEXT_CHARS;
+  return { pattern, chars };
+}
+
+/** 兼容旧版本规则：补齐稳定化名 / 跨 cue 连续扫描 / 上下文条件所需字段 */
 export function normalizeRule(rule: MaskRule): MaskRule {
   return {
     ...rule,
@@ -20,12 +34,25 @@ export function normalizeRule(rule: MaskRule): MaskRule {
       rule.maxCueGapMs >= 0
         ? Math.round(rule.maxCueGapMs)
         : DEFAULT_MAX_CUE_GAP_MS,
+    preContext: normalizeContextCondition(rule.preContext),
+    postContext: normalizeContextCondition(rule.postContext),
   };
 }
 
 /** 校验正则源码与标志，返回错误文案或 null */
 export function validateRegex(pattern: string, flags: string): string | null {
   if (!pattern) return '正则不能为空';
+  try {
+    new RegExp(pattern, flags);
+    return null;
+  } catch (e) {
+    return (e as Error).message;
+  }
+}
+
+/** 校验上下文条件正则：空 pattern 表示不限制（合法），否则须能编译 */
+export function validateContextRegex(pattern: string, flags: string): string | null {
+  if (!pattern) return null;
   try {
     new RegExp(pattern, flags);
     return null;

@@ -4,6 +4,7 @@ import type {
   AliasEntry,
   AuditRecord,
   AuditReport,
+  ContextCondition,
   CueHit,
   DecisionSource,
   EntityDecision,
@@ -29,6 +30,11 @@ export const DEFAULT_MAX_CUE_GAP_MS = 500;
 /** 跨 cue 间隔上限，防止误填超大值把整份字幕拼成一个窗口 */
 export const MAX_CUE_GAP_MS_LIMIT = 600_000;
 
+/** 上下文条件的默认检查字符数（填写了条件正则但未填字符数时） */
+export const DEFAULT_CONTEXT_CHARS = 20;
+/** 上下文检查字符数上限，防止误填超大值拖慢扫描 */
+export const MAX_CONTEXT_CHARS_LIMIT = 500;
+
 /** 规整跨 cue 最大间隔：非负有限数，超出上限截断，非法值回退默认 */
 export function normalizeMaxCueGapMs(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
@@ -37,7 +43,23 @@ export function normalizeMaxCueGapMs(value: unknown): number {
   return DEFAULT_MAX_CUE_GAP_MS;
 }
 
-/** 兼容旧版本规则：补齐 mode / aliasPrefix / 跨 cue 字段，并规整非法值 */
+/**
+ * 规整上下文条件：pattern 非字符串按空串（不限制）；
+ * 字符数取正整数、超出上限截断、非法值回退默认。
+ * 旧任务缺少该字段时得到空条件（不限制）。
+ */
+export function normalizeContextCondition(value: unknown): ContextCondition {
+  const v = (value ?? {}) as { pattern?: unknown; chars?: unknown };
+  const pattern = typeof v.pattern === 'string' ? v.pattern : '';
+  let chars =
+    typeof v.chars === 'number' && Number.isFinite(v.chars)
+      ? Math.round(v.chars)
+      : DEFAULT_CONTEXT_CHARS;
+  if (chars < 1) chars = DEFAULT_CONTEXT_CHARS;
+  return { pattern, chars: Math.min(chars, MAX_CONTEXT_CHARS_LIMIT) };
+}
+
+/** 兼容旧版本规则：补齐 mode / aliasPrefix / 跨 cue / 上下文条件字段，并规整非法值 */
 export function normalizeRule(rule: MaskRule): MaskRule {
   return {
     ...rule,
@@ -45,6 +67,8 @@ export function normalizeRule(rule: MaskRule): MaskRule {
     aliasPrefix: typeof rule.aliasPrefix === 'string' ? rule.aliasPrefix : '',
     crossCue: rule.crossCue === true,
     maxCueGapMs: normalizeMaxCueGapMs(rule.maxCueGapMs),
+    preContext: normalizeContextCondition(rule.preContext),
+    postContext: normalizeContextCondition(rule.postContext),
   };
 }
 
@@ -80,6 +104,10 @@ export function entityDecisionKey(ruleId: string, entityKey: string): string {
 export interface CompiledRule {
   rule: MaskRule;
   regex: RegExp;
+  /** 命中前上下文条件正则（空条件为 null，不限制） */
+  preRegex: RegExp | null;
+  /** 命中后上下文条件正则（空条件为 null，不限制） */
+  postRegex: RegExp | null;
 }
 
 export function compileRules(rules: MaskRule[]): {
@@ -99,12 +127,63 @@ export function compileRules(rules: MaskRule[]): {
       flagSet.delete('y');
       flagSet.delete('d');
       const regex = new RegExp(rule.pattern, Array.from(flagSet).join(''));
-      compiled.push({ rule, regex });
+      // 上下文条件正则复用规则标志（i/u/s 等），但去掉 g/y：
+      // test() 语义下 g 的 lastIndex 状态会导致交替误判
+      const ctxFlags = Array.from(flagSet)
+        .filter((f) => f !== 'g')
+        .join('');
+      let preRegex: RegExp | null = null;
+      let postRegex: RegExp | null = null;
+      try {
+        if (rule.preContext.pattern) {
+          preRegex = new RegExp(rule.preContext.pattern, ctxFlags);
+        }
+        if (rule.postContext.pattern) {
+          postRegex = new RegExp(rule.postContext.pattern, ctxFlags);
+        }
+      } catch (e) {
+        errors.push({
+          ruleId: rule.id,
+          message: `上下文条件正则无效：${(e as Error).message}`,
+        });
+        continue;
+      }
+      compiled.push({ rule, regex, preRegex, postRegex });
     } catch (e) {
       errors.push({ ruleId: rule.id, message: (e as Error).message });
     }
   }
   return { compiled, errors };
+}
+
+/* ------------------------------------------------------------------ */
+/* 上下文条件判断                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 判断候选命中是否满足规则的上下文条件。
+ * 在候选命中所在扫描窗口文本 text 上，取命中前 / 后最多 chars 个字符
+ * 作为上下文（窗口边缘按实际可用字符截取），用条件正则检索。
+ * 返回未通过的一侧列表（空数组 = 通过；两侧都未通过时两侧都列出）。
+ */
+export function failedContextSides(
+  compiled: CompiledRule,
+  text: string,
+  start: number,
+  end: number,
+): ('pre' | 'post')[] {
+  const { rule, preRegex, postRegex } = compiled;
+  const failed: ('pre' | 'post')[] = [];
+  if (preRegex) {
+    const from = Math.max(0, start - rule.preContext.chars);
+    preRegex.lastIndex = 0;
+    if (!preRegex.test(text.slice(from, start))) failed.push('pre');
+  }
+  if (postRegex) {
+    postRegex.lastIndex = 0;
+    if (!postRegex.test(text.slice(end, end + rule.postContext.chars))) failed.push('post');
+  }
+  return failed;
 }
 
 /* ------------------------------------------------------------------ */
@@ -440,12 +519,14 @@ export function buildPreview(input: {
   }
 
   const raw: RawHit[] = [];
+  /** 上下文条件过滤计数：被过滤的候选命中不进入优先级与重叠消解 */
+  const contextFiltered = { pre: 0, post: 0 };
   const scanText = (
-    rule: MaskRule,
-    regex: RegExp,
+    compiled: CompiledRule,
     text: string,
     spansOf: (start: number, end: number) => RawSpan[],
   ): void => {
+    const { rule, regex } = compiled;
     regex.lastIndex = 0;
     let m: RegExpExecArray | null;
     // 防止零宽命中死循环
@@ -453,6 +534,13 @@ export function buildPreview(input: {
       const matched = m[0];
       if (matched.length === 0) {
         regex.lastIndex++;
+        continue;
+      }
+      // 先按所在扫描窗口取上下文完成条件判断，未通过的候选直接过滤，
+      // 不进入后续优先级与重叠消解（避免被过滤的高优先级命中压制低优先级结果）
+      const failed = failedContextSides(compiled, text, m.index, m.index + matched.length);
+      if (failed.length > 0) {
+        for (const side of failed) contextFiltered[side]++;
         continue;
       }
       const isAlias = rule.mode === 'alias';
@@ -474,12 +562,13 @@ export function buildPreview(input: {
   /* 单 cue 规则：逐条 cue 扫描（原有行为） */
   for (const cue of parsed.cues) {
     const { text } = plainByCue.get(cue.index)!;
-    for (const { rule, regex } of singleCueRules) {
-      scanText(rule, regex, text, (start, end) => [{ cueIndex: cue.index, start, end }]);
+    for (const c of singleCueRules) {
+      scanText(c, text, (start, end) => [{ cueIndex: cue.index, start, end }]);
     }
   }
 
-  /* 跨 cue 规则：按各自最大间隔把相邻 cue 拼成扫描窗口，被断开的敏感串也能命中 */
+  /* 跨 cue 规则：按各自最大间隔把相邻 cue 拼成扫描窗口，被断开的敏感串也能命中；
+     上下文条件同样在拼接窗口上取（窗口边缘按实际可用字符） */
   if (crossCueRules.length > 0) {
     const windowInput = parsed.cues.map((cue) => ({
       index: cue.index,
@@ -492,8 +581,8 @@ export function buildPreview(input: {
       const windows = buildScanWindows(windowInput, gap);
       const rules = crossCueRules.filter((c) => c.rule.maxCueGapMs === gap);
       for (const win of windows) {
-        for (const { rule, regex } of rules) {
-          scanText(rule, regex, win.text, (start, end) =>
+        for (const c of rules) {
+          scanText(c, win.text, (start, end) =>
             spansFromWindowRange(win, start, end),
           );
         }
@@ -649,6 +738,7 @@ export function buildPreview(input: {
     revertedHits,
     suppressedHits,
     exceptionHits,
+    contextFiltered,
     cues,
     parseErrors: parsed.errors,
     aliases,
@@ -750,7 +840,8 @@ export function buildFinalText(cue: CueHit): { text: string; segments: SafetySca
  *    或因替换改变上下文而落在纯原文上的全新命中 → 阻断导出，列出全部涉及区间。
  * 开启跨 cue 模式的规则在「相邻 cue 候选文本拼接窗口」上二次扫描，
  * 被断开残留的敏感串同样会被发现；问题记录涉及的全部 cue。
- * 不做优先级合并：任何残留命中都需要被审校员看到。
+ * 上下文条件在二次扫描中同样生效（候选文本窗口上判断），
+ * 被条件过滤的残留不列为问题。不做优先级合并：任何残留命中都需要被审校员看到。
  */
 export function runSafetyScan(
   cues: CueHit[],
@@ -784,14 +875,14 @@ export function runSafetyScan(
   };
 
   const scanOnce = (
-    rule: MaskRule,
-    regex: RegExp,
+    compiled: CompiledRule,
     text: string,
     locate: (
       start: number,
       end: number,
     ) => { anchorCueIndex: number; overlapped: SafetyScanSegment[]; cueIndexes: number[]; anchorStart: number; anchorEnd: number },
   ): void => {
+    const { rule, regex } = compiled;
     regex.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = regex.exec(text)) !== null) {
@@ -802,6 +893,9 @@ export function runSafetyScan(
       }
       const start = m.index;
       const end = start + matched.length;
+      // 与第一遍一致：候选文本上同样先过上下文条件，
+      // 被条件过滤的残留不算问题（规则本就声明该语境不脱敏）
+      if (failedContextSides(compiled, text, start, end).length > 0) continue;
       const { anchorCueIndex, overlapped, cueIndexes, anchorStart, anchorEnd } = locate(
         start,
         end,
@@ -835,8 +929,8 @@ export function runSafetyScan(
   for (const cue of cues) {
     const { text, segments } = finalByCue.get(cue.index)!;
     if (!text) continue;
-    for (const { rule, regex } of singleCueRules) {
-      scanOnce(rule, regex, text, (start, end) => ({
+    for (const c of singleCueRules) {
+      scanOnce(c, text, (start, end) => ({
         anchorCueIndex: cue.index,
         overlapped: segments.filter((s) => s.start < end && start < s.end),
         cueIndexes: [cue.index],
@@ -859,8 +953,8 @@ export function runSafetyScan(
       const windows = buildScanWindows(windowInput, gap);
       const rules = crossCueRules.filter((c) => c.rule.maxCueGapMs === gap);
       for (const win of windows) {
-        for (const { rule, regex } of rules) {
-          scanOnce(rule, regex, win.text, (start, end) => {
+        for (const c of rules) {
+          scanOnce(c, win.text, (start, end) => {
             const spans = spansFromWindowRange(win, start, end);
             const overlapped: SafetyScanSegment[] = [];
             for (const span of spans) {
@@ -972,7 +1066,7 @@ export function exportResult(input: {
   const sha256 = createHash('sha256').update(input.vtt, 'utf8').digest('hex');
   const audit: AuditReport = {
     app: 'subtitle-mask-console',
-    version: 5,
+    version: 6,
     generatedAt: new Date().toISOString(),
     source: {
       sha256,
@@ -986,6 +1080,7 @@ export function exportResult(input: {
       revertedHits: preview.revertedHits,
       suppressedHits: preview.suppressedHits,
       exceptionHits: preview.exceptionHits,
+      contextFiltered: preview.contextFiltered,
     },
     records,
     aliases: preview.aliases,

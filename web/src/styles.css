@@ -459,6 +459,28 @@ select:focus {
   color: #0e7490;
 }
 
+/* ---------------- 上下文条件 ---------------- */
+.mode-badge.mode-context {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.rule-context {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+}
+.rule-context-hint {
+  margin: 0;
+}
+
+.stat-filtered {
+  color: #b45309;
+  font-weight: 600;
+}
+
 .rule-cross {
   display: flex;
   align-items: center;
